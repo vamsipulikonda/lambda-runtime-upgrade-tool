@@ -110,9 +110,9 @@ select_source_runtime() {
 
   echo ""
   echo "  Upgrade FROM which runtime?"
-  echo "    1) python3.8     5) python3.12    8) nodejs20.x"
-  echo "    2) python3.9     6) python3.13    c) Custom"
-  echo "    3) python3.10    7) nodejs16.x"
+  echo "    1) python3.8     5) python3.12     9) nodejs20.x"
+  echo "    2) python3.9     6) python3.13    10) nodejs22.x"
+  echo "    3) python3.10    7) nodejs16.x     c) Custom"
   echo "    4) python3.11    8) nodejs18.x"
   echo ""
   read -p "  Select [3]: " choice
@@ -122,7 +122,7 @@ select_source_runtime() {
     3) SOURCE_RUNTIME="python3.10";; 4) SOURCE_RUNTIME="python3.11";;
     5) SOURCE_RUNTIME="python3.12";; 6) SOURCE_RUNTIME="python3.13";;
     7) SOURCE_RUNTIME="nodejs16.x";; 8) SOURCE_RUNTIME="nodejs18.x";;
-    9) SOURCE_RUNTIME="nodejs20.x";;
+    9) SOURCE_RUNTIME="nodejs20.x";; 10) SOURCE_RUNTIME="nodejs22.x";;
     c|C) read -p "  Enter runtime: " SOURCE_RUNTIME;;
     *) SOURCE_RUNTIME="python3.10";;
   esac
@@ -145,12 +145,13 @@ select_target_version() {
     esac
     TRANSFORM_NAME="AWS/python-version-upgrade"
   elif [[ "$SOURCE_RUNTIME" == nodejs* ]]; then
-    echo "    1) Node.js 18    2) Node.js 20    3) Node.js 22 (latest)"
-    read -p "  Select [3]: " choice
-    case "${choice:-3}" in
+    echo "    1) Node.js 18    2) Node.js 20    3) Node.js 22    4) Node.js 24 (latest)"
+    read -p "  Select [4]: " choice
+    case "${choice:-4}" in
       1) TARGET_VERSION="18"; TARGET_RUNTIME="nodejs18.x";;
       2) TARGET_VERSION="20"; TARGET_RUNTIME="nodejs20.x";;
-      *) TARGET_VERSION="22"; TARGET_RUNTIME="nodejs22.x";;
+      3) TARGET_VERSION="22"; TARGET_RUNTIME="nodejs22.x";;
+      *) TARGET_VERSION="24"; TARGET_RUNTIME="nodejs24.x";;
     esac
     TRANSFORM_NAME="AWS/nodejs-version-upgrade"
   fi
