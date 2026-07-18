@@ -293,14 +293,14 @@ confirm() {
 }
 
 # ─────────────────────────────────────────────────────────────
-# Core: upgrade a single function
+# Core: upgrade a single function (with layer support)
 # ─────────────────────────────────────────────────────────────
 upgrade_one_function() {
   local func_name="$1"
   local func_dir="$WORK_DIR/$func_name"
   local log_file="$WORK_DIR/${func_name}.log"
 
-  mkdir -p "$func_dir/src"
+  mkdir -p "$func_dir/src" "$func_dir/layer"
 
   {
     echo "[$func_name] Downloading code..."
@@ -318,7 +318,99 @@ upgrade_one_function() {
     local timeout=$(echo "$config" | python3 -c "import json,sys;print(json.load(sys.stdin)['Timeout'])")
     local memory=$(echo "$config" | python3 -c "import json,sys;print(json.load(sys.stdin)['MemorySize'])")
 
-    # Create SAM template
+    # ─── Layer handling ───
+    local has_layers=false
+    local layer_arns=""
+    local layer_names=""
+    local new_layer_arns=""
+
+    # Check if function has layers
+    layer_arns=$(echo "$config" | python3 -c "
+import json,sys
+config=json.load(sys.stdin)
+layers=config.get('Layers',[])
+if layers:
+    print('\n'.join(l['Arn'] for l in layers))
+" 2>/dev/null)
+
+    if [ -n "$layer_arns" ]; then
+      has_layers=true
+      echo "[$func_name] Found layers, downloading layer contents..."
+
+      local layer_idx=0
+      local all_layer_reqs=""
+
+      while IFS= read -r layer_arn; do
+        [ -z "$layer_arn" ] && continue
+        layer_idx=$((layer_idx + 1))
+
+        # Extract layer name and version from ARN
+        local layer_name=$(echo "$layer_arn" | python3 -c "import sys; parts=sys.stdin.read().strip().split(':'); print(parts[-2])")
+        local layer_version=$(echo "$layer_arn" | python3 -c "import sys; parts=sys.stdin.read().strip().split(':'); print(parts[-1])")
+
+        echo "[$func_name]   Layer $layer_idx: $layer_name (v$layer_version)"
+
+        # Download layer
+        local layer_url=$(aws lambda get-layer-version \
+          --layer-name "$layer_name" \
+          --version-number "$layer_version" \
+          --region "$REGION" \
+          --query 'Content.Location' --output text 2>/dev/null)
+
+        if [ -n "$layer_url" ] && [ "$layer_url" != "None" ]; then
+          local layer_dir="$func_dir/layer/${layer_name}"
+          mkdir -p "$layer_dir"
+          curl -s -o "$func_dir/layer/${layer_name}.zip" "$layer_url"
+          unzip -q -o "$func_dir/layer/${layer_name}.zip" -d "$layer_dir/"
+          rm "$func_dir/layer/${layer_name}.zip"
+
+          # Extract dependencies from layer's python/ directory
+          python3 -c "
+import os
+layer_python='$layer_dir/python'
+reqs=[]
+
+# Check python/ and python/lib/pythonX.Y/site-packages/
+search_dirs=[layer_python]
+for d in os.listdir(layer_python) if os.path.isdir(layer_python) else []:
+    subdir=os.path.join(layer_python,d)
+    if os.path.isdir(subdir):
+        search_dirs.append(subdir)
+        # Check lib/pythonX.Y/site-packages
+        sp=os.path.join(subdir,'site-packages')
+        if os.path.isdir(sp):
+            search_dirs.append(sp)
+
+for search_dir in search_dirs:
+    if not os.path.isdir(search_dir):
+        continue
+    for item in os.listdir(search_dir):
+        if item.endswith('.dist-info'):
+            mp=os.path.join(search_dir,item,'METADATA')
+            if os.path.exists(mp):
+                n=v=''
+                for l in open(mp):
+                    if l.startswith('Name: '): n=l.strip().split(': ')[1]
+                    if l.startswith('Version: '): v=l.strip().split(': ')[1]
+                    if n and v: break
+                if n and v: reqs.append(f'{n}=={v}')
+
+# Write layer-specific requirements
+with open('$func_dir/layer/${layer_name}_requirements.txt','w') as f:
+    f.write('\n'.join(sorted(set(reqs)))+'\n' if reqs else '')
+print(f'      Found {len(reqs)} packages in layer')
+" 2>/dev/null
+
+        else
+          echo "[$func_name]   ⚠ Could not download layer $layer_name (may be AWS-managed)"
+        fi
+      done <<< "$layer_arns"
+
+      # Merge all layer requirements into one file
+      cat "$func_dir"/layer/*_requirements.txt 2>/dev/null | sort -u > "$func_dir/layer_requirements.txt"
+    fi
+
+    # ─── Create SAM template ───
     cat > "$func_dir/template.yaml" << EOF
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
@@ -333,7 +425,8 @@ Resources:
       MemorySize: $memory
 EOF
 
-    # Extract bundled dependencies
+    # ─── Build combined requirements.txt ───
+    # From function deployment package
     python3 -c "
 import os
 src='$func_dir/src'; reqs=[]
@@ -347,33 +440,121 @@ for item in os.listdir(src):
                 if l.startswith('Version: '): v=l.strip().split(': ')[1]
                 if n and v: break
             if n and v: reqs.append(f'{n}=={v}')
-open('$func_dir/requirements.txt','w').write(('\n'.join(reqs)+'\n') if reqs else '')
+open('$func_dir/function_requirements.txt','w').write(('\n'.join(reqs)+'\n') if reqs else '')
 " 2>/dev/null
 
-    # Git init
+    # Combine function + layer requirements
+    cat "$func_dir/function_requirements.txt" "$func_dir/layer_requirements.txt" 2>/dev/null | sort -u > "$func_dir/requirements.txt"
+
+    if [ -s "$func_dir/requirements.txt" ]; then
+      echo "[$func_name] Combined requirements.txt:"
+      cat "$func_dir/requirements.txt" | sed 's/^/    /'
+    fi
+
+    # ─── Git init ───
     cd "$func_dir"
     git init -q && git add . && git commit -q -m "Initial: $func_name ($SOURCE_RUNTIME)"
 
-    # Run ATX
+    # ─── Run ATX ───
     echo "[$func_name] Running ATX transform..."
     atx custom def exec \
       -n "$TRANSFORM_NAME" \
       -p . \
       -c "python3 -c \"import compileall; compileall.compile_dir('src', quiet=1)\"" \
       -x -t \
-      --configuration "additionalPlanContext=The target Python version to upgrade to is Python $TARGET_VERSION" \
+      --configuration "additionalPlanContext=The target Python version to upgrade to is Python $TARGET_VERSION. The requirements.txt contains all dependencies including those from Lambda layers that need upgrading." \
       > "$func_dir/atx-output.log" 2>&1 || true
 
-    # Check & redeploy
+    # ─── Check success & redeploy ───
     if grep -q "$TARGET_RUNTIME" template.yaml 2>/dev/null; then
+      echo "[$func_name] Transform succeeded!"
+
+      # Redeploy function code
       (cd src && zip -q -r ../upgraded.zip .)
       aws lambda update-function-code \
         --function-name "$func_name" \
         --zip-file "fileb://$func_dir/upgraded.zip" \
         --region "$REGION" > /dev/null
       aws lambda wait function-updated --function-name "$func_name" --region "$REGION" 2>/dev/null || sleep 5
-      aws lambda update-function-configuration \
-        --function-name "$func_name" --runtime "$TARGET_RUNTIME" --region "$REGION" > /dev/null
+
+      # ─── Rebuild and publish layer if function had layers ───
+      if [ "$has_layers" = true ] && [ -s "$func_dir/requirements.txt" ]; then
+        echo "[$func_name] Rebuilding layer with upgraded dependencies..."
+
+        local new_layer_dir="$func_dir/new_layer/python"
+        mkdir -p "$new_layer_dir"
+
+        # Install upgraded requirements into layer structure
+        # Use the ATX-upgraded requirements.txt
+        pip3 install \
+          -r "$func_dir/requirements.txt" \
+          -t "$new_layer_dir" \
+          --platform manylinux2014_x86_64 \
+          --only-binary=:all: \
+          --python-version "${TARGET_VERSION}" \
+          --quiet 2>/dev/null || \
+        pip3 install \
+          -r "$func_dir/requirements.txt" \
+          -t "$new_layer_dir" \
+          --quiet 2>/dev/null || true
+
+        # Check if we got packages installed
+        if [ "$(ls -A "$new_layer_dir" 2>/dev/null)" ]; then
+          # Also copy any native libs from the original layer (libodbc.so etc.)
+          for layer_dir in "$func_dir"/layer/*/; do
+            [ -d "$layer_dir" ] || continue
+            # Copy non-python directories (lib/, bin/, etc.)
+            for dir in lib bin etc; do
+              if [ -d "$layer_dir/$dir" ]; then
+                cp -r "$layer_dir/$dir" "$func_dir/new_layer/"
+              fi
+            done
+            # Copy config files (odbcinst.ini, odbc.ini, etc.)
+            find "$layer_dir" -maxdepth 1 -name "*.ini" -exec cp {} "$func_dir/new_layer/" \; 2>/dev/null
+            # Copy any non-python subdirectories (msodbcsql17/, etc.)
+            find "$layer_dir" -maxdepth 1 -type d ! -name "python" ! -name "." -exec cp -r {} "$func_dir/new_layer/" \; 2>/dev/null
+          done
+
+          # Package new layer
+          (cd "$func_dir/new_layer" && zip -q -r ../new_layer.zip .)
+
+          # Publish new layer version
+          local layer_name_base=$(echo "$layer_arns" | head -1 | python3 -c "import sys; parts=sys.stdin.read().strip().split(':'); print(parts[-2])")
+          local new_layer_name="${layer_name_base}-${TARGET_RUNTIME}"
+
+          local new_layer_response=$(aws lambda publish-layer-version \
+            --layer-name "$new_layer_name" \
+            --zip-file "fileb://$func_dir/new_layer.zip" \
+            --compatible-runtimes "$TARGET_RUNTIME" \
+            --region "$REGION" 2>/dev/null)
+
+          local new_layer_arn=$(echo "$new_layer_response" | python3 -c "import json,sys;print(json.load(sys.stdin)['LayerVersionArn'])" 2>/dev/null)
+
+          if [ -n "$new_layer_arn" ]; then
+            echo "[$func_name] Published new layer: $new_layer_arn"
+            new_layer_arns="$new_layer_arn"
+          else
+            echo "[$func_name] ⚠ Layer publish failed, continuing without layer update"
+          fi
+        else
+          echo "[$func_name] ⚠ Could not install layer packages, keeping original layers"
+        fi
+      fi
+
+      # Update runtime (and layer if we have a new one)
+      if [ -n "$new_layer_arns" ]; then
+        aws lambda update-function-configuration \
+          --function-name "$func_name" \
+          --runtime "$TARGET_RUNTIME" \
+          --layers "$new_layer_arns" \
+          --region "$REGION" > /dev/null
+      else
+        aws lambda update-function-configuration \
+          --function-name "$func_name" --runtime "$TARGET_RUNTIME" --region "$REGION" > /dev/null
+      fi
+
+      aws lambda wait function-updated --function-name "$func_name" --region "$REGION" 2>/dev/null || sleep 5
+
       echo "[$func_name] ✅ SUCCESS → $TARGET_RUNTIME"
       echo "$func_name" >> "$WORK_DIR/succeeded.txt"
     else
