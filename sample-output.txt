@@ -1,0 +1,152 @@
+════════════════════════════════════════════════════════════
+  🚀 Lambda Runtime Upgrade Tool v2
+     Powered by AWS Transform custom (Parallel Mode)
+════════════════════════════════════════════════════════════
+
+► Checking prerequisites...
+  ✓ AWS CLI aws-cli/2.33.13
+  ✓ ATX Version: 3.5.0
+  ✓ git 2.50.1
+  ✓ Python 3.13.11
+  ✓ AWS Account: 112688127610
+
+✅ All prerequisites met!
+────────────────────────────────────────────────────────────
+
+► Select AWS Region
+
+    1) us-east-1      5) eu-west-1      8) ap-southeast-1
+    2) us-east-2      6) eu-central-1   9) ap-northeast-1
+    3) us-west-1      7) ap-south-1     c) Custom
+    4) us-west-2
+
+  Select [1]: 1
+  → us-east-1
+
+► Scanning us-east-1 for Lambda runtimes...
+
+  Runtimes found in your account (us-east-1):
+  ─────────────────────────────────────────
+    40 × python3.10
+    23 × python3.9 (deprecated)
+    21 × python3.13 (current)
+     9 × python3.11
+     6 × python3.12 (current)
+     5 × python3.8 (deprecated)
+
+  Upgrade FROM which runtime?
+    1) python3.8     4) python3.11    7) nodejs18.x
+    2) python3.9     5) python3.12    8) nodejs20.x
+    3) python3.10    6) nodejs16.x    c) Custom
+
+  Select [3]: 4
+  → python3.11
+
+► Upgrade TO which version?
+
+    1) Python 3.11    2) Python 3.12    3) Python 3.13 (latest)
+
+  Select [3]: 3
+  → Upgrade: python3.11 → python3.13
+
+► Discovering python3.11 functions in us-east-1...
+
+  Found 9 functions on python3.11:
+
+     1) Lambda-dlq                                    0.3 KB
+     2) Cognito_trigger                               0.3 KB
+     3) caching-lambda                                0.6 KB
+     4) Initi-failure                                 0.3 KB
+     5) send-req-to-endpoint                          0.7 KB [1 layer]
+     6) Bedrock-lambda                                1.0 KB [1 layer]
+     7) Lambda-s3-Access-Point-test                   0.7 KB [1 layer]
+     8) throttle-auth                                 0.6 KB
+     9) Terminate_ec2                                 0.3 KB
+
+  Options:
+    a) Upgrade ALL 9 functions
+    s) Select specific ones (e.g., 1,3,5)
+    q) Quit
+
+  Choose [a]: a
+
+  Selected: 9 functions
+
+► Execution mode
+
+    1) Sequential (one at a time — safe, slower)
+    2) Parallel - 3 at a time
+    3) Parallel - 5 at a time
+    4) Parallel - ALL at once (fastest)
+
+  Select [4]: 4
+  → All 9 in parallel (fastest)
+
+────────────────────────────────────────────────────────────
+
+  UPGRADE PLAN:
+    Region:      us-east-1
+    From:        python3.11
+    To:          python3.13
+    Functions:   9
+    Mode:        Parallel (max 999)
+    Transform:   AWS/python-version-upgrade
+
+  ⚠️  This will modify Lambda functions in your account.
+
+  Proceed? (y/n) [y]: y
+
+────────────────────────────────────────────────────────────
+
+  Starting upgrades...
+  Work directory: /Users/vamsipul/Documents/lambda-upgrades-20260714_224028
+
+  🚀 Launching: Lambda-dlq
+  🚀 Launching: Cognito_trigger
+  🚀 Launching: caching-lambda
+  🚀 Launching: Initi-failure
+  🚀 Launching: send-req-to-endpoint
+  🚀 Launching: Bedrock-lambda
+  🚀 Launching: Lambda-s3-Access-Point-test
+  🚀 Launching: throttle-auth
+  🚀 Launching: Terminate_ec2
+
+  ⏳ Waiting for all 9 transforms to complete...
+     (typically 3-7 minutes per function, running in parallel)
+
+  Progress: 9 / 9 complete
+
+════════════════════════════════════════════════════════════
+  📊 UPGRADE REPORT
+════════════════════════════════════════════════════════════
+
+  Region:          us-east-1
+  Upgrade:         python3.11 → python3.13
+  Total:           9
+  Succeeded:       9
+  Failed:          0
+
+  ✅ Successfully upgraded:
+     • Lambda-dlq → python3.13
+     • Cognito_trigger → python3.13
+     • caching-lambda → python3.13
+     • Initi-failure → python3.13
+     • send-req-to-endpoint → python3.13
+     • Bedrock-lambda → python3.13
+     • Lambda-s3-Access-Point-test → python3.13
+     • throttle-auth → python3.13
+     • Terminate_ec2 → python3.13
+
+  Verification:
+     ✓ Lambda-dlq = python3.13
+     ✓ Cognito_trigger = python3.13
+     ✓ caching-lambda = python3.13
+     ✓ Initi-failure = python3.13
+     ✓ send-req-to-endpoint = python3.13
+     ✓ Bedrock-lambda = python3.13
+     ✓ Lambda-s3-Access-Point-test = python3.13
+     ✓ throttle-auth = python3.13
+     ✓ Terminate_ec2 = python3.13
+
+  Logs: /Users/vamsipul/Documents/lambda-upgrades-20260714_224028/
+════════════════════════════════════════════════════════════
