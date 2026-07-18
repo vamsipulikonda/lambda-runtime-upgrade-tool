@@ -110,17 +110,19 @@ select_source_runtime() {
 
   echo ""
   echo "  Upgrade FROM which runtime?"
-  echo "    1) python3.8     4) python3.11    7) nodejs18.x"
-  echo "    2) python3.9     5) python3.12    8) nodejs20.x"
-  echo "    3) python3.10    6) nodejs16.x    c) Custom"
+  echo "    1) python3.8     5) python3.12    8) nodejs20.x"
+  echo "    2) python3.9     6) python3.13    c) Custom"
+  echo "    3) python3.10    7) nodejs16.x"
+  echo "    4) python3.11    8) nodejs18.x"
   echo ""
   read -p "  Select [3]: " choice
 
   case "${choice:-3}" in
     1) SOURCE_RUNTIME="python3.8";; 2) SOURCE_RUNTIME="python3.9";;
     3) SOURCE_RUNTIME="python3.10";; 4) SOURCE_RUNTIME="python3.11";;
-    5) SOURCE_RUNTIME="python3.12";; 6) SOURCE_RUNTIME="nodejs16.x";;
-    7) SOURCE_RUNTIME="nodejs18.x";; 8) SOURCE_RUNTIME="nodejs20.x";;
+    5) SOURCE_RUNTIME="python3.12";; 6) SOURCE_RUNTIME="python3.13";;
+    7) SOURCE_RUNTIME="nodejs16.x";; 8) SOURCE_RUNTIME="nodejs18.x";;
+    9) SOURCE_RUNTIME="nodejs20.x";;
     c|C) read -p "  Enter runtime: " SOURCE_RUNTIME;;
     *) SOURCE_RUNTIME="python3.10";;
   esac
@@ -133,12 +135,13 @@ select_target_version() {
   echo ""
 
   if [[ "$SOURCE_RUNTIME" == python* ]]; then
-    echo "    1) Python 3.11    2) Python 3.12    3) Python 3.13 (latest)"
-    read -p "  Select [3]: " choice
-    case "${choice:-3}" in
+    echo "    1) Python 3.11    2) Python 3.12    3) Python 3.13    4) Python 3.14 (latest)"
+    read -p "  Select [4]: " choice
+    case "${choice:-4}" in
       1) TARGET_VERSION="3.11"; TARGET_RUNTIME="python3.11";;
       2) TARGET_VERSION="3.12"; TARGET_RUNTIME="python3.12";;
-      *) TARGET_VERSION="3.13"; TARGET_RUNTIME="python3.13";;
+      3) TARGET_VERSION="3.13"; TARGET_RUNTIME="python3.13";;
+      *) TARGET_VERSION="3.14"; TARGET_RUNTIME="python3.14";;
     esac
     TRANSFORM_NAME="AWS/python-version-upgrade"
   elif [[ "$SOURCE_RUNTIME" == nodejs* ]]; then
