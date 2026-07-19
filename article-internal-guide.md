@@ -22,10 +22,12 @@ This guide walks you through an automated approach using **AWS Transform custom*
 An interactive bash script that:
 
 1. **Discovers** all Lambda functions in your account on a chosen runtime
-2. **Downloads** each function's code
+2. **Downloads** each function's code and layer contents
 3. **Runs ATX** to upgrade code + dependencies + IaC configuration
-4. **Redeploys** the upgraded function with the new runtime
-5. **Reports** success/failure with full logs
+4. **Rebuilds layers** with dependencies compatible with the target runtime
+5. **Redeploys** the upgraded function with the new runtime and layer
+6. **Validates** by invoking the function — rolls back automatically on fatal errors
+7. **Reports** success/failure with inline error messages
 
 All in **parallel** — 9 functions upgraded simultaneously in ~5 minutes.
 
@@ -40,9 +42,12 @@ All in **parallel** — 9 functions upgraded simultaneously in ~5 minutes.
 │  │                                                      │ │
 │  │  1. aws lambda list-functions (discover)             │ │
 │  │  2. aws lambda get-function (download code)          │ │
-│  │  3. atx custom def exec (transform — parallel)       │ │
-│  │  4. aws lambda update-function-code (redeploy)       │ │
-│  │  5. aws lambda update-function-configuration         │ │
+│  │  3. aws lambda get-layer-version (download layers)   │ │
+│  │  4. atx custom def exec (transform — parallel)       │ │
+│  │  5. pip install (rebuild layer for target runtime)    │ │
+│  │  6. aws lambda update-function-code (redeploy)       │ │
+│  │  7. aws lambda publish-layer-version (new layer)     │ │
+│  │  8. aws lambda invoke (validate)                     │ │
 │  └──────────────┬──────────────────────────┬────────────┘ │
 │                 │                          │              │
 │        ┌────────▼────────┐       ┌────────▼────────┐    │
@@ -67,7 +72,7 @@ All in **parallel** — 9 functions upgraded simultaneously in ~5 minutes.
 | AWS CLI v2 | https://aws.amazon.com/cli/ |
 | ATX CLI | `curl -fsSL https://app.transform.aws.dev/install \| bash` |
 | Git | Pre-installed on most systems |
-| Python 3 | Pre-installed on most systems |
+| Python 3.10+ | Required for layer rebuilding (pip needs modern wheel metadata) |
 | AWS credentials | `aws configure` or `aws sso login` |
 
 ### IAM Permissions Required
@@ -77,14 +82,17 @@ All in **parallel** — 9 functions upgraded simultaneously in ~5 minutes.
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "LambdaDiscoveryAndUpgrade",
       "Effect": "Allow",
       "Action": [
         "lambda:ListFunctions",
         "lambda:GetFunction",
         "lambda:GetFunctionConfiguration",
+        "lambda:GetLayerVersion",
+        "lambda:PublishLayerVersion",
         "lambda:UpdateFunctionCode",
         "lambda:UpdateFunctionConfiguration",
-        "lambda:PublishVersion",
+        "lambda:InvokeFunction",
         "sts:GetCallerIdentity"
       ],
       "Resource": "*"
@@ -105,6 +113,14 @@ cd lambda-runtime-upgrade-tool
 ```
 
 **Source**: https://github.com/vamsipulikonda/lambda-runtime-upgrade-tool/blob/main/lambda-runtime-upgrade-v2.sh
+
+## Supported Runtimes
+
+| Language | From | To | ATX Transformation |
+|----------|------|----|--------------------|
+| Python | 3.8, 3.9, 3.10, 3.11, 3.12 | 3.11, 3.12, 3.13, 3.14 | AWS/python-version-upgrade |
+| Node.js | 16.x, 18.x, 20.x | 18.x, 20.x, 22.x, 24.x | AWS/nodejs-version-upgrade |
+| Java | 8.al2, 11, 17 | 11, 17, 21, 25 | AWS/java-version-upgrade |
 
 ## How It Works
 
@@ -141,37 +157,49 @@ It lists every function on the chosen runtime with size and layer information:
     s) Select specific ones (e.g., 1,3,5)
 ```
 
-You can upgrade all or pick specific functions.
+You can upgrade all or pick specific functions, then choose execution mode (sequential or parallel).
 
 ### Step 3: Parallel Transform
 
 For each selected function, the script (in parallel):
 
 1. Downloads the function's code via `aws lambda get-function`
-2. Creates a SAM project structure with `template.yaml`
-3. Detects bundled dependencies from `.dist-info` metadata
-4. Initializes a git repo (required by ATX)
-5. Runs `atx custom def exec -n AWS/python-version-upgrade`
+2. Downloads all attached layers and extracts dependency metadata
+3. Creates a SAM project structure with `template.yaml`
+4. Merges function + layer dependencies into a combined `requirements.txt`
+5. Initializes a git repo (required by ATX)
+6. Runs `atx custom def exec -n AWS/python-version-upgrade`
 
 ATX then:
 - Analyzes the code and dependencies
-- Identifies what needs to change for the target Python version
+- Identifies what needs to change for the target version
 - Upgrades deprecated patterns (e.g., `datetime.utcnow()` → `datetime.now(timezone.utc)`)
 - Upgrades dependency versions (e.g., pydantic v1 → v2, moto 4 → 5)
 - Removes packages that are now in stdlib (e.g., `importlib-metadata` on Python 3.10+)
 - Validates by compiling all files on the target runtime
 - Commits changes to a local git branch
 
-### Step 4: Redeploy
+### Step 4: Layer Rebuild & Redeploy
 
 If the transform succeeds:
 1. Packages the transformed code into a zip
 2. Updates the function code (`update-function-code`)
-3. Updates the runtime setting (`update-function-configuration`)
+3. If the function had layers:
+   - Installs upgraded dependencies using `pip install --platform manylinux2014_x86_64`
+   - Copies native libraries from original layers (libodbc.so, etc.)
+   - Publishes a new layer version for the target runtime
+4. Updates the runtime and layer ARN (`update-function-configuration`)
 
 If the transform **fails**, the function is left untouched on the original runtime.
 
-### Step 5: Report
+### Step 5: Validation & Rollback
+
+After deploying, the script invokes the function with an empty payload:
+- **Fatal errors** (ImportModuleError, HandlerNotFound, SyntaxError) → automatic rollback to original runtime + layers
+- **Application errors** (KeyError, ValueError from empty payload) → treated as success (function loaded fine, just needs real input)
+- **No error** → confirmed success
+
+### Step 6: Report
 
 ```
 ════════════════════════════════════════════════════════════
@@ -181,15 +209,21 @@ If the transform **fails**, the function is left untouched on the original runti
   Region:          us-east-1
   Upgrade:         python3.11 → python3.13
   Total:           9
-  Succeeded:       9
-  Failed:          0
+  Succeeded:       8
+  Failed:          1
 
   ✅ Successfully upgraded:
      • Lambda-dlq → python3.13
      • Cognito_trigger → python3.13
      ...
+
+  ❌ Failed:
+     • Numpy-Lambda
+       → Runtime.ImportModuleError: Unable to import module 'lambda_function': ...
 ════════════════════════════════════════════════════════════
 ```
+
+Failed functions display the actual error message inline — no need to dig through log files.
 
 ## Real-World Results
 
@@ -229,18 +263,22 @@ No upfront cost. No infrastructure to deploy. Pay only for active agent time.
 
 ## Limitations
 
-- **Lambda Layers**: Functions with runtime-specific layers (e.g., `AWSSDKPandas-Python311`) need the layer ARN updated separately after upgrade
 - **Container image functions**: Not supported (no code zip to download)
-- **No tests in the function**: ATX validates compilation but can't run functional tests — recommend post-deploy smoke testing
+- **AWS-managed layers**: Layers you don't own (e.g., AWS SDK layers) may not be downloadable
+- **Local Python < 3.10**: Layer rebuild will fail for packages that dropped Python 3.9 support (numpy, pandas, etc.)
+- **No functional tests**: ATX validates compilation but can't run your test suite — recommend post-deploy smoke testing
+- **IaC not updated**: The tool updates deployed functions but not your source repo's CloudFormation/Terraform/SAM templates
 - **Cross-account**: Run the script per account, or modify to assume roles
-- **Functions > 50MB**: May hit local disk limits during extraction
+- **Functions > 250MB unzipped**: May hit local disk limits during extraction
 
 ## Safety
 
-- Functions where ATX transform **fails** are **never redeployed** — they stay on the original runtime untouched
-- All original code is preserved in the work directory
-- Full git history maintained so you can diff before/after
-- Logs saved per function for review and audit
+- **Automatic rollback**: Fatal runtime errors after upgrade trigger rollback to original runtime + layers
+- **Transform failures safe**: Functions where ATX transform fails are never redeployed — left untouched
+- **Non-fatal errors tolerated**: Application errors from empty test payloads don't trigger rollback
+- **Code preserved**: All original code saved in work directory with full git history
+- **Error reporting**: Failed functions show actual error messages in the final report
+- **Layer ARNs saved**: Original layer configurations stored for manual rollback if needed
 
 **Recommendation**: Always run against a non-production account first to validate the approach works for your function patterns.
 
@@ -266,19 +304,25 @@ For production functions, consider:
 
 ## Rollback
 
-If a function breaks after upgrade:
+The script automatically rolls back on fatal errors. For manual rollback:
 
 ```bash
-# Immediate rollback to previous runtime
+# Restore original runtime
 aws lambda update-function-configuration \
   --function-name <function-name> \
   --runtime python3.11 \
   --region us-east-1
+
+# Restore original layers (ARNs saved in work directory)
+aws lambda update-function-configuration \
+  --function-name <function-name> \
+  --layers arn:aws:lambda:us-east-1:123456789:layer:MyLayer:1 \
+  --region us-east-1
 ```
 
-The original code is also preserved in the work directory at:
+Original layer ARNs are saved at:
 ```
-lambda-upgrades-YYYYMMDD_HHMMSS/<function-name>/src/
+lambda-upgrades-YYYYMMDD_HHMMSS/<function-name>/original_layer_arns.txt
 ```
 
 ## Scaling Beyond 50 Functions

@@ -8,9 +8,10 @@
         "lambda:ListFunctions",
         "lambda:GetFunction",
         "lambda:GetFunctionConfiguration",
+        "lambda:GetLayerVersion",
+        "lambda:PublishLayerVersion",
         "lambda:UpdateFunctionCode",
         "lambda:UpdateFunctionConfiguration",
-        "lambda:PublishVersion",
         "lambda:InvokeFunction"
       ],
       "Resource": "*"
