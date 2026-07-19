@@ -25,8 +25,6 @@
 
 ► Scanning us-east-1 for Lambda runtimes...
 
-  Runtimes found in your account (us-east-1):
-  ─────────────────────────────────────────
     40 × python3.10
     23 × python3.9 (deprecated)
     21 × python3.13 (current)
@@ -35,18 +33,20 @@
      5 × python3.8 (deprecated)
 
   Upgrade FROM which runtime?
-    1) python3.8     4) python3.11    7) nodejs18.x
-    2) python3.9     5) python3.12    8) nodejs20.x
-    3) python3.10    6) nodejs16.x    c) Custom
+    1) python3.8      6) python3.13     11) java8.al2
+    2) python3.9      7) nodejs16.x     12) java11
+    3) python3.10     8) nodejs18.x     13) java17
+    4) python3.11     9) nodejs20.x     14) java21
+    5) python3.12    10) nodejs22.x      c) Custom
 
   Select [3]: 4
   → python3.11
 
 ► Upgrade TO which version?
 
-    1) Python 3.11    2) Python 3.12    3) Python 3.13 (latest)
+    1) Python 3.11    2) Python 3.12    3) Python 3.13    4) Python 3.14 (latest)
 
-  Select [3]: 3
+  Select [4]: 3
   → Upgrade: python3.11 → python3.13
 
 ► Discovering python3.11 functions in us-east-1...
@@ -149,4 +149,34 @@
      ✓ Terminate_ec2 = python3.13
 
   Logs: /Users/vamsipul/Documents/lambda-upgrades-20260714_224028/
+════════════════════════════════════════════════════════════
+
+
+────────────────────────────────────────────────────────────
+EXAMPLE: Output with failures (error messages shown inline)
+────────────────────────────────────────────────────────────
+
+════════════════════════════════════════════════════════════
+  📊 UPGRADE REPORT
+════════════════════════════════════════════════════════════
+
+  Region:          us-east-1
+  Upgrade:         python3.12 → python3.13
+  Total:           3
+  Succeeded:       1
+  Failed:          2
+
+  ✅ Successfully upgraded:
+     • Hello-World-Lambda → python3.13
+
+  ❌ Failed:
+     • Numpy-Lambda
+       → Runtime.ImportModuleError: Unable to import module 'lambda_function': Error importing numpy: you should not try to import numpy from its source directory; please exit the numpy source tree, and relaunch your python interpreter from there.
+     • Custom-Auth-Lambda
+       → Transform failed: ATX did not upgrade runtime in template.yaml
+
+  Verification:
+     ✓ Hello-World-Lambda = python3.13
+
+  Logs: /Users/vamsipul/Documents/lambda-upgrades-20260719_132835/
 ════════════════════════════════════════════════════════════
