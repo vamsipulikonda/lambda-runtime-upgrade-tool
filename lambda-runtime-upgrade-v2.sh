@@ -333,8 +333,19 @@ if layers:
     print('\n'.join(l['Arn'] for l in layers))
 " 2>/dev/null)
 
+    # Save layer ARNs to a file (avoids variable scoping issues)
+    echo "$layer_arns" > "$func_dir/original_layer_arns.txt"
+
     if [ -n "$layer_arns" ]; then
       has_layers=true
+      # Extract the first layer's name for later use
+      echo "$layer_arns" | head -1 | python3 -c "
+import sys
+arn=sys.stdin.read().strip()
+parts=arn.split(':')
+print(parts[-2])
+" > "$func_dir/layer_name_base.txt"
+
       echo "[$func_name] Found layers, downloading layer contents..."
 
       local layer_idx=0
@@ -443,7 +454,25 @@ for item in os.listdir(src):
 open('$func_dir/function_requirements.txt','w').write(('\n'.join(reqs)+'\n') if reqs else '')
 " 2>/dev/null
 
-    # Combine function + layer requirements
+    # Combine function + layer requirements (deduplicate, keep latest version per package)
+    cat "$func_dir/function_requirements.txt" "$func_dir/layer_requirements.txt" 2>/dev/null | \
+      python3 -c "
+import sys
+from packaging.version import Version
+pkgs = {}
+for line in sys.stdin:
+    line = line.strip()
+    if not line or '==' not in line: continue
+    name, ver = line.rsplit('==', 1)
+    name_lower = name.lower()
+    try:
+        if name_lower not in pkgs or Version(ver) > Version(pkgs[name_lower][1]):
+            pkgs[name_lower] = (name, ver)
+    except:
+        pkgs[name_lower] = (name, ver)
+for name, ver in sorted(pkgs.values()):
+    print(f'{name}=={ver}')
+" > "$func_dir/requirements.txt" 2>/dev/null || \
     cat "$func_dir/function_requirements.txt" "$func_dir/layer_requirements.txt" 2>/dev/null | sort -u > "$func_dir/requirements.txt"
 
     if [ -s "$func_dir/requirements.txt" ]; then
@@ -485,18 +514,70 @@ open('$func_dir/function_requirements.txt','w').write(('\n'.join(reqs)+'\n') if 
         mkdir -p "$new_layer_dir"
 
         # Install upgraded requirements into layer structure
-        # Use the ATX-upgraded requirements.txt
-        pip3 install \
-          -r "$func_dir/requirements.txt" \
-          -t "$new_layer_dir" \
-          --platform manylinux2014_x86_64 \
-          --only-binary=:all: \
-          --python-version "${TARGET_VERSION}" \
-          --quiet 2>/dev/null || \
-        pip3 install \
-          -r "$func_dir/requirements.txt" \
-          -t "$new_layer_dir" \
-          --quiet 2>/dev/null || true
+        # Note: --python-version needs format like "312" not "3.12"
+        local pip_python_version="${TARGET_VERSION//./}"
+        local pip_installed=false
+
+        # Try multiple platform variants (newer packages need newer manylinux)
+        for platform_tag in manylinux2014_x86_64 manylinux_2_28_x86_64 linux_x86_64; do
+          if [ "$pip_installed" = true ]; then break; fi
+
+          echo "[$func_name] Trying pip install with platform: $platform_tag"
+          local pip_output
+          pip_output=$(pip3 install \
+            -r "$func_dir/requirements.txt" \
+            -t "$new_layer_dir" \
+            --platform "$platform_tag" \
+            --implementation cp \
+            --only-binary=:all: \
+            --python-version "$pip_python_version" \
+            --upgrade \
+            2>&1)
+          local pip_exit=$?
+
+          if [ $pip_exit -eq 0 ] && [ "$(ls -A "$new_layer_dir" 2>/dev/null)" ]; then
+            echo "[$func_name] ✓ pip install succeeded with $platform_tag"
+            pip_installed=true
+          else
+            echo "[$func_name] ✗ Failed with $platform_tag (exit=$pip_exit)"
+            echo "[$func_name]   $(echo "$pip_output" | grep -i "error\|no matching\|could not" | head -3)"
+            # Clean up failed install attempt
+            rm -rf "${new_layer_dir:?}"/* 2>/dev/null
+          fi
+        done
+
+        # If exact pinned versions don't exist on PyPI (e.g. ATX bumped to an
+        # unreleased version), retry with unpinned package names so pip picks
+        # the latest available version for the target platform/Python instead.
+        if [ "$pip_installed" = false ] && grep -q "Could not find a version\|No matching distribution" <<< "$pip_output"; then
+          echo "[$func_name] Exact version pin not found on PyPI, retrying with unpinned versions..."
+          sed -E 's/==.*$//' "$func_dir/requirements.txt" > "$func_dir/requirements_unpinned.txt"
+
+          for platform_tag in manylinux2014_x86_64 manylinux_2_28_x86_64 linux_x86_64; do
+            if [ "$pip_installed" = true ]; then break; fi
+
+            echo "[$func_name] Trying unpinned pip install with platform: $platform_tag"
+            pip_output=$(pip3 install \
+              -r "$func_dir/requirements_unpinned.txt" \
+              -t "$new_layer_dir" \
+              --platform "$platform_tag" \
+              --implementation cp \
+              --only-binary=:all: \
+              --python-version "$pip_python_version" \
+              --upgrade \
+              2>&1)
+            pip_exit=$?
+
+            if [ $pip_exit -eq 0 ] && [ "$(ls -A "$new_layer_dir" 2>/dev/null)" ]; then
+              echo "[$func_name] ✓ Unpinned pip install succeeded with $platform_tag"
+              pip_installed=true
+            else
+              echo "[$func_name] ✗ Unpinned attempt failed with $platform_tag (exit=$pip_exit)"
+              echo "[$func_name]   $(echo "$pip_output" | grep -i "error\|no matching\|could not" | head -3)"
+              rm -rf "${new_layer_dir:?}"/* 2>/dev/null
+            fi
+          done
+        fi
 
         # Check if we got packages installed
         if [ "$(ls -A "$new_layer_dir" 2>/dev/null)" ]; then
@@ -511,30 +592,43 @@ open('$func_dir/function_requirements.txt','w').write(('\n'.join(reqs)+'\n') if 
             done
             # Copy config files (odbcinst.ini, odbc.ini, etc.)
             find "$layer_dir" -maxdepth 1 -name "*.ini" -exec cp {} "$func_dir/new_layer/" \; 2>/dev/null
-            # Copy any non-python subdirectories (msodbcsql17/, etc.)
-            find "$layer_dir" -maxdepth 1 -type d ! -name "python" ! -name "." -exec cp -r {} "$func_dir/new_layer/" \; 2>/dev/null
+            # Copy any non-python subdirectories (msodbcsql17/, mssql-tools/, etc.)
+            # Exclude __MACOSX, python, ODBCDataSources (empty), and current dir
+            for subdir in "$layer_dir"/*/; do
+              local dirname=$(basename "$subdir")
+              case "$dirname" in
+                python|__MACOSX|ODBCDataSources|include|share) continue;;
+                *) cp -r "$subdir" "$func_dir/new_layer/" 2>/dev/null;;
+              esac
+            done
           done
 
           # Package new layer
           (cd "$func_dir/new_layer" && zip -q -r ../new_layer.zip .)
 
           # Publish new layer version
-          local layer_name_base=$(echo "$layer_arns" | head -1 | python3 -c "import sys; parts=sys.stdin.read().strip().split(':'); print(parts[-2])")
-          local new_layer_name="${layer_name_base}-${TARGET_RUNTIME}"
+          # Strip any existing runtime/version suffix to get a clean base name
+          local layer_name_base=$(cat "$func_dir/layer_name_base.txt" 2>/dev/null)
+          local layer_name_clean=$(echo "$layer_name_base" | sed -E 's/[-_]python[0-9]+//g; s/[-_]py[0-9]+//g')
+          local new_layer_name="${layer_name_clean}-${TARGET_RUNTIME//.}"
+
+          echo "[$func_name] Publishing layer: $new_layer_name"
 
           local new_layer_response=$(aws lambda publish-layer-version \
             --layer-name "$new_layer_name" \
             --zip-file "fileb://$func_dir/new_layer.zip" \
             --compatible-runtimes "$TARGET_RUNTIME" \
-            --region "$REGION" 2>/dev/null)
+            --region "$REGION" 2>&1)
 
           local new_layer_arn=$(echo "$new_layer_response" | python3 -c "import json,sys;print(json.load(sys.stdin)['LayerVersionArn'])" 2>/dev/null)
 
-          if [ -n "$new_layer_arn" ]; then
+          if [ -n "$new_layer_arn" ] && [ "$new_layer_arn" != "None" ]; then
             echo "[$func_name] Published new layer: $new_layer_arn"
-            new_layer_arns="$new_layer_arn"
+            # Accumulate layer ARNs (space-separated for multiple layers)
+            new_layer_arns="${new_layer_arns:+$new_layer_arns }$new_layer_arn"
           else
-            echo "[$func_name] ⚠ Layer publish failed, continuing without layer update"
+            echo "[$func_name] ⚠ Layer publish failed:"
+            echo "[$func_name]   Response: $new_layer_response"
           fi
         else
           echo "[$func_name] ⚠ Could not install layer packages, keeping original layers"
@@ -546,7 +640,7 @@ open('$func_dir/function_requirements.txt','w').write(('\n'.join(reqs)+'\n') if 
         aws lambda update-function-configuration \
           --function-name "$func_name" \
           --runtime "$TARGET_RUNTIME" \
-          --layers "$new_layer_arns" \
+          --layers $new_layer_arns \
           --region "$REGION" > /dev/null
       else
         aws lambda update-function-configuration \
@@ -555,11 +649,93 @@ open('$func_dir/function_requirements.txt','w').write(('\n'.join(reqs)+'\n') if 
 
       aws lambda wait function-updated --function-name "$func_name" --region "$REGION" 2>/dev/null || sleep 5
 
-      echo "[$func_name] ✅ SUCCESS → $TARGET_RUNTIME"
-      echo "$func_name" >> "$WORK_DIR/succeeded.txt"
+      # ─── Post-deploy validation ───
+      echo "[$func_name] Validating deployment..."
+      local invoke_result
+      invoke_result=$(aws lambda invoke \
+        --function-name "$func_name" \
+        --payload '{}' \
+        --region "$REGION" \
+        "$func_dir/validation_response.json" 2>&1)
+
+      local invoke_status=$?
+      local has_fatal_error=false
+
+      # Only treat IMPORT and INIT errors as fatal (means layer/runtime is broken)
+      # Application errors (KeyError, ValueError, etc.) mean the code loaded fine
+      # but the empty test payload wasn't suitable — that's OK
+      if [ -f "$func_dir/validation_response.json" ]; then
+        local error_type=$(python3 -c "
+import json
+try:
+    data = json.load(open('$func_dir/validation_response.json'))
+    et = data.get('errorType', '')
+    # Fatal errors: module import failures, init errors, syntax errors
+    fatal_patterns = ['Runtime.ImportModuleError', 'Runtime.HandlerNotFound',
+                      'SyntaxError', 'IndentationError', 'Runtime.ExitError']
+    if any(p in et for p in fatal_patterns):
+        print('FATAL')
+    elif 'errorType' in data:
+        print('APP_ERROR')
+    else:
+        print('OK')
+except:
+    print('OK')
+" 2>/dev/null)
+
+        if [ "$error_type" = "FATAL" ]; then
+          has_fatal_error=true
+        elif [ "$error_type" = "APP_ERROR" ]; then
+          echo "[$func_name] ℹ Non-fatal app error with empty payload (function loaded OK):"
+          echo "[$func_name]   $(python3 -c "import json;d=json.load(open('$func_dir/validation_response.json'));print(d.get('errorType','')+ ': ' +d.get('errorMessage',''))" 2>/dev/null)"
+        fi
+      fi
+
+      if [ "$has_fatal_error" = true ]; then
+        echo "[$func_name] ⚠ Fatal runtime error detected after upgrade!"
+        echo "[$func_name] Error: $(cat "$func_dir/validation_response.json" 2>/dev/null)"
+        echo "[$func_name] Rolling back to $SOURCE_RUNTIME..."
+
+        # Rollback: restore original runtime and layers
+        local original_layers=$(cat "$func_dir/original_layer_arns.txt" 2>/dev/null | tr '\n' ' ')
+        if [ -n "$original_layers" ]; then
+          aws lambda update-function-configuration \
+            --function-name "$func_name" \
+            --runtime "$SOURCE_RUNTIME" \
+            --layers $original_layers \
+            --region "$REGION" > /dev/null 2>&1
+        else
+          aws lambda update-function-configuration \
+            --function-name "$func_name" \
+            --runtime "$SOURCE_RUNTIME" \
+            --region "$REGION" > /dev/null 2>&1
+        fi
+        aws lambda wait function-updated --function-name "$func_name" --region "$REGION" 2>/dev/null || sleep 5
+
+        # Extract error message for the report
+        local error_msg=$(python3 -c "
+import json
+try:
+    data = json.load(open('$func_dir/validation_response.json'))
+    msg = data.get('errorMessage','')
+    # Take just the first meaningful line/sentence
+    first_line = msg.split('\\n')[0].strip()
+    print(data.get('errorType','') + ': ' + first_line)
+except:
+    print('Validation failed (rolled back)')
+" 2>/dev/null)
+
+        echo "[$func_name] ❌ FAILED (rolled back to $SOURCE_RUNTIME)"
+        echo "$func_name" >> "$WORK_DIR/failed.txt"
+        echo "$func_name|$error_msg" >> "$WORK_DIR/failed_reasons.txt"
+      else
+        echo "[$func_name] ✅ SUCCESS → $TARGET_RUNTIME (validated)"
+        echo "$func_name" >> "$WORK_DIR/succeeded.txt"
+      fi
     else
-      echo "[$func_name] ❌ FAILED"
+      echo "[$func_name] ❌ FAILED (transform did not produce $TARGET_RUNTIME)"
       echo "$func_name" >> "$WORK_DIR/failed.txt"
+      echo "$func_name|Transform failed: ATX did not upgrade runtime in template.yaml" >> "$WORK_DIR/failed_reasons.txt"
     fi
   } > "$log_file" 2>&1
 }
@@ -570,7 +746,7 @@ open('$func_dir/function_requirements.txt','w').write(('\n'.join(reqs)+'\n') if 
 run_upgrades() {
   WORK_DIR="$(pwd)/lambda-upgrades-$(date +%Y%m%d_%H%M%S)"
   mkdir -p "$WORK_DIR"
-  touch "$WORK_DIR/succeeded.txt" "$WORK_DIR/failed.txt"
+  touch "$WORK_DIR/succeeded.txt" "$WORK_DIR/failed.txt" "$WORK_DIR/failed_reasons.txt"
 
   echo ""
   print_divider
@@ -665,9 +841,17 @@ print_report() {
   fi
 
   if [ "$failed" -gt 0 ]; then
-    echo -e "  ${RED}❌ Failed (check logs):${NC}"
+    echo -e "  ${RED}❌ Failed:${NC}"
     while IFS= read -r fn; do
-      echo -e "     • $fn → $WORK_DIR/$fn.log"
+      # Look up the failure reason
+      local reason=$(grep "^$fn|" "$WORK_DIR/failed_reasons.txt" 2>/dev/null | cut -d'|' -f2-)
+      if [ -n "$reason" ]; then
+        echo -e "     • $fn"
+        echo -e "       ${RED}→ $reason${NC}"
+      else
+        echo -e "     • $fn"
+        echo -e "       → See log: $WORK_DIR/$fn.log"
+      fi
     done < "$WORK_DIR/failed.txt"
     echo ""
   fi
